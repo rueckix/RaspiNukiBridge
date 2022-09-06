@@ -32,7 +32,7 @@ logging.getLogger("bleak").setLevel(logging.ERROR)
 
 class WebServer:
 
-    def __init__(self, host, port, token, nuki_manager, global_config):
+    def __init__(self, host, port, token, nuki_manager, global_config, http_callbacks):
         self._host = host
         self._port = port
         self._token = token
@@ -40,7 +40,7 @@ class WebServer:
         self.global_config = global_config
         self._start_datetime = None
         self._server_id = uuid.getnode() & 0xFFFFFFFF  # Truncate server_id to 32 bit, OpenHub doesn't like it too big
-        self._http_callbacks = [None, None, None]  # Nuki Bridge support up to 3 callbacks
+        self._http_callbacks = http_callbacks  # Nuki Bridge support up to 3 callbacks
 
     def start(self):
         app = web.Application()
@@ -114,6 +114,8 @@ class WebServer:
         if not self.nuki_manager.newstate_callback:
             self.nuki_manager.newstate_callback = self._newstate
         logger.info(f"Add http callback: {callback_url}")
+
+        self._saveCallbackState()
         return web.Response(text=json.dumps({"success": True}))
 
     async def callback_list(self, request):
@@ -127,6 +129,7 @@ class WebServer:
             raise web.HTTPForbidden()
         url_id = request.query["id"]
         self._http_callbacks[int(url_id)] = None
+        self._saveCallbackState()
         return web.Response(text=json.dumps({"success": True}))
 
     async def nuki_list(self, request):
@@ -165,6 +168,11 @@ class WebServer:
         elif "token" in request.query:
             return self._token == request.query["token"]
         return False
+
+    def _saveCallbackState(self):
+      file_name = "nuki_callback.yaml"
+      with open(file_name, 'w') as out:
+        yaml.dump(self._http_callbacks, out)
 
     async def nuki_lockaction(self, request):
         if not self._check_token(request):
@@ -257,6 +265,13 @@ if __name__ == "__main__":
     global_config = {}
     global_config["override_callback_address"] = data.get("global_config", {}).get("override_callback_address")
 
+    callback_file = "nuki_callback.yaml"
+    http_callbacks = [None, None, None]
+
+    with open(callback_file) as cbf:
+      http_callbacks = yaml.load(cbf, Loader=yaml.FullLoader)
+
+
     nuki_manager = NukiManager(name, app_id, bt_adapter)
 
     if args.pair:
@@ -291,5 +306,5 @@ if __name__ == "__main__":
             host = data["server"]["host"]
             port = data["server"]["port"]
             token = data["server"]["token"]
-            web_server = WebServer(host, port, token, nuki_manager, global_config,)
+            web_server = WebServer(host, port, token, nuki_manager, global_config, http_callbacks)
             web_server.start()
