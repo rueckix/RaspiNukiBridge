@@ -9,6 +9,8 @@ import argparse
 import uuid
 import sys
 
+import urllib.parse
+
 
 from nacl.public import PrivateKey
 from aiohttp import web, ClientSession
@@ -30,11 +32,12 @@ logging.getLogger("bleak").setLevel(logging.ERROR)
 
 class WebServer:
 
-    def __init__(self, host, port, token, nuki_manager):
+    def __init__(self, host, port, token, nuki_manager, global_config):
         self._host = host
         self._port = port
         self._token = token
         self.nuki_manager = nuki_manager
+        self.global_config = global_config
         self._start_datetime = None
         self._server_id = uuid.getnode() & 0xFFFFFFFF  # Truncate server_id to 32 bit, OpenHub doesn't like it too big
         self._http_callbacks = [None, None, None]  # Nuki Bridge support up to 3 callbacks
@@ -82,7 +85,7 @@ class WebServer:
             async with ClientSession() as session:
                 for url in filter(None, self._http_callbacks):
                     try:
-                        data = {"nukiId": hex(nuki.config["id"])[2:],
+                        data = {"nukiId": (nuki.config["id"]),
                                 "deviceType": nuki.device_type.value}  # How to get this from bt api?
                         data.update(self._get_nuki_last_state(nuki))
                         async with session.post(url, data=json.dumps(data)) as resp:
@@ -98,6 +101,12 @@ class WebServer:
         if not self._check_token(request):
             raise web.HTTPForbidden()
         callback_url = request.query["url"]
+        if (self.global_config["override_callback_address"]):
+          parsed = urllib.parse.urlparse(callback_url)
+          replaced = parsed._replace(netloc=self.global_config["override_callback_address"])
+          callback_url = replaced.geturl()
+
+
         for i, call in enumerate(self._http_callbacks):
             if not call:
                 self._http_callbacks[i] = callback_url
@@ -123,7 +132,7 @@ class WebServer:
     async def nuki_list(self, request):
         if not self._check_token(request):
             raise web.HTTPForbidden()
-        resp = [{"nukiId": hex(nuki.config["id"])[2:],
+        resp = [{"nukiId": (nuki.config["id"]),
                  "deviceType": nuki.device_type.value,  # How to get this from bt api?
                  "name": nuki.config["name"],
                  "lastKnownState": self._get_nuki_last_state(nuki)} for nuki in self.nuki_manager if nuki.config]
@@ -140,7 +149,7 @@ class WebServer:
                 "uptime": (datetime.datetime.now() - self._start_datetime).seconds,
                 "currentTime": datetime.datetime.now().isoformat()[:-7] + "Z",
                 "serverConnected": False,
-                "scanResults": [{"nukiId": hex(nuki.config["id"])[2:],
+                "scanResults": [{"nukiId": (nuki.config["id"]),
                                  "type": nuki.device_type.value,  # How to get this from bt api?
                                  "name": nuki.config["name"],
                                  "rssi": nuki.rssi,
@@ -161,7 +170,7 @@ class WebServer:
         if not self._check_token(request):
             raise web.HTTPForbidden()
         action = int(request.query["action"])
-        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"], base=16))
+        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"]))
         await n.lock_action(action)
         res = json.dumps({"success": True, "batteryCritical": n.is_battery_critical})
         return web.Response(text=res)
@@ -169,13 +178,13 @@ class WebServer:
     async def nuki_state(self, request):
         if not self._check_token(request):
             raise web.HTTPForbidden()
-        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"], base=16))
+        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"]))
         return web.Response(text=json.dumps(self._get_nuki_last_state(n)))
 
     async def nuki_lock(self, request):
         if not self._check_token(request):
             raise web.HTTPForbidden()
-        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"], base=16))
+        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"]))
         await n.lock()
         res = json.dumps({"success": True, "batteryCritical": n.is_battery_critical})
         return web.Response(text=res)
@@ -183,7 +192,7 @@ class WebServer:
     async def nuki_unlock(self, request):
         if not self._check_token(request):
             raise web.HTTPForbidden()
-        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"], base=16))
+        n = self.nuki_manager.nuki_by_id(int(request.query["nukiId"]))
         await n.unlock()
         res = json.dumps({"success": True, "batteryCritical": n.is_battery_critical})
         return web.Response(text=res)
@@ -245,6 +254,9 @@ if __name__ == "__main__":
     app_id = data["server"]["app_id"]
     bt_adapter = data["server"].get("adapter", "hci0")
 
+    global_config = {}
+    global_config["override_callback_address"] = data.get("global_config", {}).get("override_callback_address")
+
     nuki_manager = NukiManager(name, app_id, bt_adapter)
 
     if args.pair:
@@ -279,5 +291,5 @@ if __name__ == "__main__":
             host = data["server"]["host"]
             port = data["server"]["port"]
             token = data["server"]["token"]
-            web_server = WebServer(host, port, token, nuki_manager)
+            web_server = WebServer(host, port, token, nuki_manager, global_config,)
             web_server.start()
